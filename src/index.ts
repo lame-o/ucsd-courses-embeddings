@@ -85,8 +85,14 @@ async function fetchAndFilterData() {
       const description = descriptions.find(d => d.code === courseCode);
       
       if (!description) {
+        console.log(`No description found for course: ${courseCode}`);
         continue;
       }
+
+      // Debug title information
+      console.log(`\nProcessing ${courseCode}:`);
+      console.log('Title from description:', description.title);
+      console.log('Course name from Airtable:', course["Course Name"]);
 
       const courseSections = validSections.filter(section => {
         const sectionCourseId = Array.isArray(section["Course Link"]) ? section["Course Link"][0] : section["Course Link"];
@@ -97,7 +103,7 @@ async function fetchAndFilterData() {
         vectorizedCourses.push({
           id: `${description.id}-${section.id}`,
           code: description.code,
-          title: description.title,
+          title: description.title || course["Course Name"], // Fallback to Course Name if title is missing
           description: description.description,
           prerequisites: description.prerequisites,
           metadata: {
@@ -110,7 +116,9 @@ async function fetchAndFilterData() {
             room: section["Room"],
             days: section["Days"],
             availableSeats: section["Available Seats"],
-            seatLimit: section["Seat Limit"]
+            seatLimit: section["Seat Limit"],
+            title: description.title || course["Course Name"], // Also include title in metadata
+            code: courseCode
           }
         });
       }
@@ -157,16 +165,22 @@ async function uploadToPinecone(vectorizedCourses: VectorizedCourse[]) {
         const textForEmbedding = `${course.code}: ${course.title}. ${course.description} ${course.prerequisites || ''}`;
         const embedding = await generateEmbedding(textForEmbedding);
         
+        // Make sure title is included in both top level and metadata
+        const metadata = {
+          ...course.metadata,
+          code: course.code,
+          title: course.title,
+          description: course.description,
+          prerequisites: course.prerequisites || ''
+        };
+
+        // Debug title
+        console.log(`Processing ${course.code} - Title: ${course.title}`);
+        
         return {
           id: course.id,
           values: embedding,
-          metadata: {
-            ...course.metadata,
-            code: course.code,
-            title: course.title,
-            description: course.description,
-            prerequisites: course.prerequisites
-          }
+          metadata: metadata
         };
       })
     );
@@ -236,21 +250,18 @@ async function searchCourses(query: string, filters?: { building?: string, days?
 
 async function main() {
   try {
-    // Comment out data upload since we've already done it
-    // const vectorizedCourses = await fetchAndFilterData();
-    // if (vectorizedCourses.length > 0) {
-    //   await uploadToPinecone(vectorizedCourses);
-    // }
-
-    // Test some searches
-    await searchCourses("machine learning and artificial intelligence");
-    console.log('\n-------------------\n');
+    console.log('Fetching and processing course data...');
+    const vectorizedCourses = await fetchAndFilterData();
     
-    await searchCourses("data science", { building: "CSB" });
-    console.log('\n-------------------\n');
-    
-    await searchCourses("psychology research methods", { days: "MWF" });
-    
+    if (vectorizedCourses.length > 0) {
+      console.log('\nUploading courses to Pinecone...');
+      await uploadToPinecone(vectorizedCourses);
+      console.log('Upload complete!');
+      
+      // Test a search to verify the data
+      console.log('\nTesting search with new data:');
+      await searchCourses("artificial intelligence");
+    }
   } catch (error) {
     console.error('Failed to process data:', error);
   }

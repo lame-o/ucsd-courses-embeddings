@@ -37,9 +37,9 @@ export interface VectorizedCourse {
   code: string;
   title: string;
   description: string;
-  prerequisites: string;
+  prerequisites?: string;
   metadata: {
-    units: number;
+    units: string | number;
     department: string;  // Extracted from code (e.g., "CSE" from "CSE 101")
     courseNumber: string;  // Extracted from code (e.g., "101" from "CSE 101")
     instructor: string;
@@ -49,5 +49,7 @@ export interface VectorizedCourse {
     days: string;
     availableSeats: number;
     seatLimit: number;  // Changed from string to number to match Airtable
+    title: string;  // Added title to metadata
+    code: string;   // Added code to metadata
   };
 }
