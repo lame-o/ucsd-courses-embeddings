@@ -1,0 +1,22 @@
+{
+  "name": "ucsd-courses-embeddings",
+  "version": "1.0.0",
+  "description": "Generate and upload UCSD course embeddings to Pinecone",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "@pinecone-database/pinecone": "^4.1.0",
+    "airtable": "^0.12.2",
+    "dotenv": "^16.3.1",
+    "openai": "^4.83.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
