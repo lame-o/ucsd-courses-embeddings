@@ -7,6 +7,72 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Helper functions for day and time processing
+function expandDays(days: string): string[] {
+  const dayMap: { [key: string]: string } = {
+    'M': 'Monday',
+    'Tu': 'Tuesday',
+    'W': 'Wednesday',
+    'Th': 'Thursday',
+    'F': 'Friday'
+  };
+  // Split into individual days (handles MWF, TuTh etc)
+  const expanded = [];
+  let i = 0;
+  while (i < days.length) {
+    if (i < days.length - 1 && days.substring(i, i + 2) === 'Tu') {
+      expanded.push('Tuesday');
+      i += 2;
+    } else if (i < days.length - 1 && days.substring(i, i + 2) === 'Th') {
+      expanded.push('Thursday');
+      i += 2;
+    } else {
+      const current = days[i];
+      if (dayMap[current]) {
+        expanded.push(dayMap[current]);
+      }
+      i++;
+    }
+  }
+  return expanded;
+}
+
+function getTimeOfDay(time: string): string {
+  const [timeStr, ampm] = time.split(/([ap])/i);
+  const [hours] = timeStr.split(':').map(Number);
+  const isPM = ampm.toLowerCase() === 'p';
+  const hour24 = isPM ? (hours === 12 ? 12 : hours + 12) : (hours === 12 ? 0 : hours);
+  
+  if (hour24 < 12) return 'morning';
+  if (hour24 < 17) return 'afternoon';
+  return 'evening';
+}
+
+function parseTimeRange(time: string): { start: number; end: number } {
+  const [start, end] = time.split('-');
+  const parseTime = (t: string) => {
+    const [timeStr, ampm] = t.split(/([ap])/i);
+    const [hours, minutes = 0] = timeStr.split(':').map(Number);
+    const isPM = ampm.toLowerCase() === 'p';
+    return (isPM ? (hours === 12 ? 12 : hours + 12) : (hours === 12 ? 0 : hours)) * 60 + Number(minutes);
+  };
+  return {
+    start: parseTime(start),
+    end: parseTime(end)
+  };
+}
+
+function getMinifiedRecord(record: any) {
+  return {
+    id: record.id,
+    ...record.fields,
+  }
+}
+
+function getMinifiedRecords(records: ReadonlyArray<any> | any[]) {
+  return records.map((record) => getMinifiedRecord(record))
+}
+
 // Create Airtable instances
 const mainAirtable = new Airtable({
   apiKey: process.env.NEXT_PUBLIC_AIRTABLE_API_KEY
@@ -25,17 +91,6 @@ const descriptionsBase = descriptionsAirtable.base(process.env.NEXT_PUBLIC_AIRTA
 const sectionsTable = sectionsBase(process.env.NEXT_PUBLIC_AIRTABLE_TABLE_NAME_Sections!);
 const coursesTable = coursesBase(process.env.NEXT_PUBLIC_AIRTABLE_TABLE_NAME_Courses!);
 const descriptionsTable = descriptionsBase(process.env.NEXT_PUBLIC_AIRTABLE_TABLE_NAME_Descriptions!);
-
-function getMinifiedRecord(record: any) {
-  return {
-    id: record.id,
-    ...record.fields,
-  }
-}
-
-function getMinifiedRecords(records: ReadonlyArray<any> | any[]) {
-  return records.map((record) => getMinifiedRecord(record))
-}
 
 async function fetchAndFilterData() {
   try {
@@ -161,19 +216,39 @@ async function uploadToPinecone(vectorizedCourses: VectorizedCourse[]) {
     const batch = vectorizedCourses.slice(i, i + batchSize);
     const vectors = await Promise.all(
       batch.map(async (course) => {
-        // Create a rich text representation for embedding
-        const textForEmbedding = `${course.code}: ${course.title}. ${course.description} ${course.prerequisites || ''}`;
-        const embedding = await generateEmbedding(textForEmbedding);
+        // Create metadata with expanded time and day information
+        const expandedDays = expandDays(course.metadata.days);
+        const timeOfDay = getTimeOfDay(course.metadata.time);
+        const timeRange = parseTimeRange(course.metadata.time);
         
-        // Make sure title is included in both top level and metadata
         const metadata = {
           ...course.metadata,
           code: course.code,
           title: course.title,
           description: course.description,
-          prerequisites: course.prerequisites || ''
+          prerequisites: course.prerequisites || '',
+          expandedDays,
+          timeOfDay,
+          timeStart: timeRange.start,
+          timeEnd: timeRange.end
         };
 
+        // Create a rich text representation for embedding
+        const textForEmbedding = `
+          Course: ${course.code}: ${course.title}
+          This lecture has a capacity of ${course.metadata.seatLimit} students.
+          Schedule: This class meets on ${expandedDays.join(' and ')} 
+          during the ${timeOfDay} at ${course.metadata.time}.
+          Location: ${course.metadata.building} ${course.metadata.room}
+          Instructor: ${course.metadata.instructor}
+          Description: ${course.description}
+          Prerequisites: ${course.prerequisites || 'None'}
+          Department: ${course.metadata.department}
+          Units: ${course.metadata.units}
+        `.trim().replace(/\n\s+/g, ' ');
+        
+        const embedding = await generateEmbedding(textForEmbedding);
+        
         // Debug title
         console.log(`Processing ${course.code} - Title: ${course.title}`);
         
@@ -191,27 +266,34 @@ async function uploadToPinecone(vectorizedCourses: VectorizedCourse[]) {
   console.log('Upload complete!');
 }
 
-type CourseMetadata = {
-  code: string;
-  title: string;
-  description: string;
-  prerequisites?: string;
-  units: string | number;
-  department: string;
-  courseNumber: string;
-  instructor: string;
-  time: string;
-  building: string;
-  room: string;
-  days: string;
-  availableSeats: number;
-  seatLimit: number;
-}
-
-async function searchCourses(query: string, filters?: { building?: string, days?: string }) {
+async function searchCourses(query: string, filters?: { building?: string; days?: string; timeOfDay?: string }) {
   console.log(`\nSearching for: "${query}"`);
   if (filters) {
     console.log('Filters:', filters);
+  }
+
+  // Parse the query for time and day information
+  const timeKeywords = ['morning', 'afternoon', 'evening'];
+  const dayKeywords = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
+  
+  const queryLower = query.toLowerCase();
+  let timeFilter: string | undefined;
+  let dayFilter: string | undefined;
+
+  // Extract time of day from query
+  for (const time of timeKeywords) {
+    if (queryLower.includes(time)) {
+      timeFilter = time;
+      break;
+    }
+  }
+
+  // Extract day from query
+  for (const day of dayKeywords) {
+    if (queryLower.includes(day)) {
+      dayFilter = day.charAt(0).toUpperCase() + day.slice(1);
+      break;
+    }
   }
 
   const pinecone = new Pinecone({
@@ -222,18 +304,30 @@ async function searchCourses(query: string, filters?: { building?: string, days?
   // Generate embedding for the search query
   const queryEmbedding = await generateEmbedding(query);
 
+  // Build filter conditions
+  const filterConditions: any = {};
+  if (dayFilter) {
+    filterConditions.expandedDays = { $in: [dayFilter] };
+  }
+  if (timeFilter) {
+    filterConditions.timeOfDay = timeFilter;
+  }
+  if (filters?.building) {
+    filterConditions.building = filters.building;
+  }
+
   // Search in Pinecone
   const results = await index.query({
     vector: queryEmbedding,
     topK: 5,
-    filter: filters,
+    filter: Object.keys(filterConditions).length > 0 ? filterConditions : undefined,
     includeMetadata: true
   });
 
   // Format and display results
   console.log('\nSearch Results:');
   results.matches.forEach((match, i) => {
-    const metadata = match.metadata as CourseMetadata;
+    const metadata = match.metadata as any;
     const score = typeof match.score === 'number' ? match.score : 0;
     console.log(`\n${i + 1}. ${metadata.code}: ${metadata.title || 'No title'} (Score: ${score.toFixed(3)})`);
     console.log(`   Time: ${metadata.days} ${metadata.time} in ${metadata.building} ${metadata.room}`);
@@ -248,19 +342,38 @@ async function searchCourses(query: string, filters?: { building?: string, days?
   });
 }
 
+async function deleteAllVectors() {
+  console.log('Deleting all vectors from Pinecone...');
+  const pinecone = new Pinecone({
+    apiKey: process.env.PINECONE_API_KEY!
+  });
+  const index = pinecone.index(process.env.PINECONE_INDEX_NAME!);
+  
+  // Delete all vectors
+  await index.deleteAll();
+  console.log('All vectors deleted from index');
+}
+
 async function main() {
   try {
-    console.log('Fetching and processing course data...');
+    // First delete all existing vectors
+    await deleteAllVectors();
+    
+    console.log('\nFetching and processing course data...');
     const vectorizedCourses = await fetchAndFilterData();
     
     if (vectorizedCourses.length > 0) {
-      console.log('\nUploading courses to Pinecone...');
+      console.log('\nUploading courses to Pinecone with updated embeddings...');
       await uploadToPinecone(vectorizedCourses);
       console.log('Upload complete!');
       
-      // Test a search to verify the data
-      console.log('\nTesting search with new data:');
-      await searchCourses("artificial intelligence");
+      // Test various schedule and size queries
+      console.log('\nTesting search with new embeddings:');
+      await searchCourses("music classes on wednesday");
+      console.log('\n-------------------\n');
+      await searchCourses("computer science classes that meet on friday");
+      console.log('\n-------------------\n');
+      await searchCourses("large astrology classes in the afternoon");
     }
   } catch (error) {
     console.error('Failed to process data:', error);
